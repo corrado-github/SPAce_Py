@@ -8,7 +8,9 @@ from scipy.stats import norm
 from scipy.special import voigt_profile
 from astropy.modeling.models import Voigt1D
 import matplotlib.pyplot as plt
-from SPace_ML_data import gamL_coeff
+from SPace_data import gamL_coeff
+
+from astropy.convolution import convolve, Box1DKernel
 
 from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
 from sklearn.neural_network import MLPRegressor
@@ -93,27 +95,6 @@ def compute_voigtD1_profile(wave, wave_c, fwhm, ew, logg, teff, poly):
 #    print('ew, area ' , ew, norm_area)
     return profile(wave)*ew/norm_area
 ###########################################
-#def make_model_1(llist, ML_models_dict, spec_df, pars_scaled):
-#
-#    model_df = spec_df.copy()
-#    model_df.flux = 0.0
-#
-##    pdb.set_trace()
-#    pars = scaler.inverse_transform([pars_scaled])[0]
-#
-#    for index, model in ML_models_dict.items():
-#
-#        wave_centre = llist.wavelength.loc[index]
-#        ew = ML_models_dict[index].predict([pars_scaled])[0]
-#        if ew<1.:
-#            continue
-#        boole_w = (np.abs(model_df.index - wave_centre) <= 3*fwhm)
-#        wave_interval = model_df[boole_w].index - wave_centre
-#        idx = model_df.index[boole_w]
-#        model_df.loc[idx,'flux'] += compute_voigtD1_profile(model_df[boole_w].index, wave_centre, fwhm, ew/1000., pars[1], pars[0])
-#
-#    return model_df
-###########################################
 def make_model(llist, ML_models_dict, wave_arr, pars_scaled, scaler, fwhm, poly):
 
 #    pdb.set_trace()
@@ -133,28 +114,71 @@ def make_model(llist, ML_models_dict, wave_arr, pars_scaled, scaler, fwhm, poly)
 
         model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(wave_arr[pos_ini:pos_end], wave_centre, fwhm, ew/1000., pars[1], pars[0], poly)
 
-    return model_arr.sum(axis=0)
+    return 1.0 - model_arr.sum(axis=0)
 ###########################################
-def compute_residuals(pars, wave, spec_obs, llist, ML_models_dict,scaler, fwhm, poly):
-
+def compute_residuals(pars, wave, flux_obs, llist, ML_models_dict,scaler, fwhm, poly):
+    global continuum
+    
     print(scaler.inverse_transform(np.array([pars])))
-    model_df = make_model(llist, ML_models_dict, wave, pars, scaler, fwhm, poly)
-#    residuals = model_df.flux.values - spec_df_obs.flux.values
-    residuals = model_df - spec_obs
+    flux_model = make_model(llist, ML_models_dict, wave, pars, scaler, fwhm, poly)
+    continuum = fit_continuum(flux_obs, flux_model)
+    residuals = flux_model - np.divide(flux_obs, continuum)
+
     return residuals
+#####################################
+def fit_continuum(flux_obs, flux_model):
+
+    resid = flux_obs - flux_model
+    box_1D_kernel = Box1DKernel(60)
+    smooth_resid = convolve(resid, box_1D_kernel)
+    return 1.0 + smooth_resid
+#####################################
+def select_user_interval_ll(llist, wlranges_list):
+
+    boole2drop = np.ones(len(llist)).astype(bool)
+
+    for wave1, wave2 in wlranges_list:
+        wave_inf = np.min([wave1, wave2])
+        wave_sup = np.max([wave1, wave2])
+        boole2keep_local = (llist.wavelength >= wave_inf) & (llist.wavelength <= wave_sup)
+        boole2drop = boole2drop & ~boole2keep_local
+    idx2drop = llist[boole2drop].index
+    llist.drop(idx2drop, inplace=True)
+
+    return llist
+#####################################
+def select_user_interval_spec(spec, wlranges_list):
+
+    boole2drop = np.ones(len(spec)).astype(bool)
+
+    for wave1, wave2 in wlranges_list:
+        wave_inf = np.min([wave1, wave2])
+        wave_sup = np.max([wave1, wave2])
+        boole2keep_local = (spec.wave >= wave_inf) & (spec.wave <= wave_sup)
+        boole2drop = boole2drop & ~boole2keep_local
+    idx2drop = spec[boole2drop].index
+    spec.drop(idx2drop, inplace=True)
+
+    return spec.wave, spec.flux
 ###########################################
-def space_proc(infiles, GCOG_dir, wlranges, working_dir):
+def space_proc(infiles, GCOG_dir, wlranges_list, working_dir):
+    global continuum
 
     poly = PolynomialFeatures(degree=2)
 
-    llist = pd.read_csv(GCOG_dir + 'linelist.csv', index_col=0, nrows=500)
+    llist = pd.read_csv(GCOG_dir + 'linelist.csv', index_col=0)#, nrows=5000)
+    #select the part of the llist chosen by the user
+    llist = select_user_interval_ll(llist, wlranges_list)
+
 
     ML_models_dict = {}
 
     spec_file = infiles[0]
     spec_ = pd.read_csv(spec_file, delimiter='\s+',index_col=None, header=0, names=['wave', 'flux'])
-    spec_obs = 1. - spec_[(spec_.wave<4850) & (spec_.wave>4800)].flux.values
-    wave = spec_[(spec_.wave<4850) & (spec_.wave>4800)].wave.values
+    wave_obs, flux_obs = select_user_interval_spec(spec_, wlranges_list)
+
+#    flux_obs = 1. - spec_[(spec_.wave<4850) & (spec_.wave>4800)].flux.values
+#    wave_obs = spec_[(spec_.wave<4850) & (spec_.wave>4800)].wave.values
 
     #wave = np.arange(4800.0-5., llist.wavelength.iloc[-1],0.3)
     #flux = np.zeros(len(wave))
@@ -162,7 +186,6 @@ def space_proc(infiles, GCOG_dir, wlranges, working_dir):
 
     fwhm = 0.2
     scaler = pickle.load(open(GCOG_dir + 'scaler_NN', 'rb'))
-    pars_scaled_obs = scaler.transform(np.array([[5000, 4.2, 0.0, 0.0]]))[0]
     pars_scaled_ini = scaler.transform(np.array([[5500, 4.0, -0.3, 0.1]]))[0]
 
 
@@ -170,15 +193,20 @@ def space_proc(infiles, GCOG_dir, wlranges, working_dir):
         model_name = idx + '_NN_model'
         ML_models_dict[idx] = pickle.load(open(GCOG_dir + model_name, 'rb'))
 
-    #spec_obs = make_model(llist, ML_models_dict, wave, pars_scaled_obs)
+    #pars_scaled_obs = scaler.transform(np.array([[5000, 4.2, 0.0, 0.0]]))[0]
+    #flux = make_model(llist, ML_models_dict, wave_obs, pars_scaled_obs)
 
 
-    out = least_squares(compute_residuals, pars_scaled_ini, args=(wave, spec_obs, llist, ML_models_dict, scaler, fwhm, poly), method='lm', diff_step=0.01, xtol=0.1)
+    out = least_squares(compute_residuals, pars_scaled_ini, args=(wave_obs, flux_obs, llist, ML_models_dict, scaler, fwhm, poly), method='lm', diff_step=0.01, gtol=0.1)
     
-    spec_model = make_model(llist, ML_models_dict, wave, out.x, scaler, fwhm, poly)
+    flux_model = make_model(llist, ML_models_dict, wave_obs, out.x, scaler, fwhm, poly)
 
-    plt.plot(wave, spec_obs, color='green', linewidth=3, linestyle='dashed')
-    plt.plot(wave, spec_model, color='blue')
+#    smooth_resid = fit_continuum(flux_obs, flux_model)
+
+    plt.plot(wave_obs, np.divide(flux_obs,continuum), color='green', linewidth=3, linestyle='dashed')
+    plt.plot(wave_obs, flux_obs, color='black', linewidth=1, linestyle='dashed')
+    plt.plot(wave_obs, flux_model, color='blue')
+    plt.plot(wave_obs, continuum, color='red')
     plt.show()
 
 ########################################################################
@@ -209,9 +237,10 @@ def space_options(options=None):
     #working directory where SP_Ace write its outputs (that will be deleted after being read).
     if not os.path.exists(args.working_dir):
         os.makedirs(args.working_dir)
-        print("WORKING DIRECTORY: %s Created!" %(args.WORKING_DIR))
+        print("WORKING DIRECTORY: %s Created!" %(args.working_dir))
     working_dir=args.working_dir+os.path.sep
     working_dir=working_dir.replace(' ','')
+
 
     #GCOG directory
     if not os.path.exists(args.GCOG_dir):
@@ -226,21 +255,21 @@ def space_options(options=None):
             wlranges_list.append([float(x) for x in item.split(",")])
 
 
-    space_proc(infiles, GCOG_dir, wlranges, working_dir)
+    space_proc(infiles, GCOG_dir, wlranges_list, working_dir)
 ########################################################################
 if __name__ == '__main__':
 
     current_dir = os.getcwd()
     work_dir = current_dir + '/work'
 
-    blue_range = '4900.0,5900.0'
+    blue_range = '5250.0,5300.0'
     red_range = '6300.0,6860.0'
 
     option= [
     '--infiles', '/home/corrado/workTux2/sp_test_space/elodie/R20/01964-SN100_N.asc', 
-    '--wlranges', red_range, blue_range,
+    '--wlranges', blue_range,
     '--working_dir', work_dir,
-    '--GCOG_dir', '/home/corrado/astro/space_ML_GCOG/libGCOG_ML/',
+    '--GCOG_dir', '/home/corrado/workTux2/EW_library_SPACE2.2/libGCOG_ML/',
 #    '--error_est', 'False',
     #the following options are not necessary and have default values
 #    '--Salaris_MH', 'True',
