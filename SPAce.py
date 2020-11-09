@@ -95,32 +95,41 @@ def compute_voigtD1_profile(wave, wave_c, fwhm, ew, logg, teff, poly):
 #    print('ew, area ' , ew, norm_area)
     return profile(wave)*ew/norm_area
 ###########################################
-def make_model(llist, ML_models_dict, wave_arr, pars_scaled, scaler, fwhm, poly):
+def make_model(llist, ML_models_dict, wave_arr, variables, scaler, poly):
 
 #    pdb.set_trace()
+    pars_scaled = variables[0:3]
+
+    pars_scaled = np.append(pars_scaled, 0.0) #add the El/M equal to zero
+    fwhm = np.abs(variables[3])
+    rv = variables[4]
+
     model_arr = np.zeros((len(ML_models_dict),len(wave_arr)))
 
 
     pars = scaler.inverse_transform([pars_scaled])[0]
+    print(pars[0:3], fwhm, rv)
+
+    shift = 1.0+rv/299792.0 #doppler shift to apply to wavelength
 
     for i, (index, model) in enumerate(ML_models_dict.items()):
 
         wave_centre = llist.wavelength.loc[index]
+        wave_rv_shifted = wave_centre * shift
         ew = model.predict([pars_scaled])[0]
         if ew<1.:
             continue
         pos_ini = np.argmin(np.abs(wave_arr-(wave_centre-3*fwhm)))
         pos_end = np.argmin(np.abs(wave_arr-(wave_centre+3*fwhm)))
 
-        model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(wave_arr[pos_ini:pos_end], wave_centre, fwhm, ew/1000., pars[1], pars[0], poly)
+        model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(wave_arr[pos_ini:pos_end], wave_rv_shifted, fwhm, ew/1000., pars[1], pars[0], poly)
 
     return 1.0 - model_arr.sum(axis=0)
 ###########################################
-def compute_residuals(pars, wave, flux_obs, llist, ML_models_dict,scaler, fwhm, poly):
+def compute_residuals(variables, wave, flux_obs, llist, ML_models_dict,scaler, poly):
     global continuum
     
-    print(scaler.inverse_transform(np.array([pars])))
-    flux_model = make_model(llist, ML_models_dict, wave, pars, scaler, fwhm, poly)
+    flux_model = make_model(llist, ML_models_dict, wave, variables, scaler, poly)
     continuum = fit_continuum(flux_obs, flux_model)
     residuals = flux_model - np.divide(flux_obs, continuum)
 
@@ -184,10 +193,15 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir):
     #flux = np.zeros(len(wave))
     #spec_df = pd.DataFrame({'flux': flux}, index=wave)
 
+    teff = 5000.
+    logg = 3.0
+    met = -0.3
     fwhm = 0.2
+    rv = 0.0
     scaler = pickle.load(open(GCOG_dir + 'scaler_NN', 'rb'))
-    pars_scaled_ini = scaler.transform(np.array([[5500, 4.0, -0.3, 0.1]]))[0]
-
+    variables = scaler.transform(np.array([[teff, logg, met, 0.0]]))[0]
+    #append fwhm and rv
+    variables = np.append(variables[0:3], [fwhm, rv])
 
     for idx in llist.index.tolist():
         model_name = idx + '_NN_model'
@@ -197,9 +211,9 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir):
     #flux = make_model(llist, ML_models_dict, wave_obs, pars_scaled_obs)
 
 
-    out = least_squares(compute_residuals, pars_scaled_ini, args=(wave_obs, flux_obs, llist, ML_models_dict, scaler, fwhm, poly), method='lm', diff_step=0.01, gtol=0.1)
+    out = least_squares(compute_residuals, variables, args=(wave_obs, flux_obs, llist, ML_models_dict, scaler, poly), method='lm', diff_step=0.01, gtol=0.1)
     
-    flux_model = make_model(llist, ML_models_dict, wave_obs, out.x, scaler, fwhm, poly)
+    flux_model = make_model(llist, ML_models_dict, wave_obs, out.x, scaler, poly)
 
 #    smooth_resid = fit_continuum(flux_obs, flux_model)
 
