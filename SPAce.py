@@ -87,9 +87,9 @@ def compute_gauss_profile(wave_centre, wave, fwhm, ew):
 #    strength = voigt_profile(wave, sigma_arr, gamma_arr)*ew
 #    return strength
 ###########################################
-def compute_voigtD1_profile(wave, wave_c, fwhm, ew, logg, teff, poly):
+def compute_voigtD1_profile(wave, wave_c, fwhm, gamma, ew, logg, teff, poly):
 
-    gamma = compute_gamma(ew, fwhm/2.35, logg, teff, poly)
+
     profile = Voigt1D(x_0=wave_c, fwhm_L=gamma*2, fwhm_G=fwhm)
     norm_area = np.dot(profile(wave[0:-1]),np.diff(wave)).sum()
 #    print('ew, area ' , ew, norm_area)
@@ -117,12 +117,15 @@ def make_model(llist, ML_models_dict, wave_arr, variables, scaler, poly):
         wave_centre = llist.wavelength.loc[index]
         wave_rv_shifted = wave_centre * shift
         ew = model.predict([pars_scaled])[0]
+        gamma = compute_gamma(ew/1000., fwhm/2.35, pars[1], pars[0], poly)
+        width = fwhm + gamma
         if ew<1.:
             continue
-        pos_ini = np.argmin(np.abs(wave_arr-(wave_centre-3*fwhm)))
-        pos_end = np.argmin(np.abs(wave_arr-(wave_centre+3*fwhm)))
+        pos_ini = np.argmin(np.abs(wave_arr-(wave_centre-3*width)))
+        pos_end = np.argmin(np.abs(wave_arr-(wave_centre+3*width)))
 
-        model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(wave_arr[pos_ini:pos_end], wave_rv_shifted, fwhm, ew/1000., pars[1], pars[0], poly)
+
+        model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(wave_arr[pos_ini:pos_end], wave_rv_shifted, fwhm, gamma, ew/1000., pars[1], pars[0], poly)
 
     return 1.0 - model_arr.sum(axis=0)
 ###########################################
@@ -293,7 +296,7 @@ if __name__ == '__main__':
     current_dir = os.getcwd()
     work_dir = current_dir + '/work'
 
-    blue_range = '5250.0,5300.0'
+    blue_range = '5212.0,5712.0'
     red_range = '6300.0,6860.0'
 
     option= [
