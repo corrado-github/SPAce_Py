@@ -126,19 +126,19 @@ def make_model(llist, ML_models_dict, wave_arr, variables, scaler, poly):
 
     return 1.0 - model_arr.sum(axis=0)
 ###########################################
-def compute_residuals(variables, wave, flux_obs, llist, ML_models_dict,scaler, poly):
+def compute_residuals(variables, wave, flux_obs, llist, ML_models_dict,scaler, poly, norm_rad_pix):
     global continuum
     
     flux_model = make_model(llist, ML_models_dict, wave, variables, scaler, poly)
-    continuum = fit_continuum(flux_obs, flux_model)
+    continuum = fit_continuum(flux_obs, flux_model, norm_rad_pix)
     residuals = flux_model - np.divide(flux_obs, continuum)
 
     return residuals
 #####################################
-def fit_continuum(flux_obs, flux_model):
+def fit_continuum(flux_obs, flux_model, norm_rad_pix):
 
     resid = flux_obs - flux_model
-    box_1D_kernel = Box1DKernel(60)
+    box_1D_kernel = Box1DKernel(norm_rad_pix*2)
     smooth_resid = convolve(resid, box_1D_kernel)
     return 1.0 + smooth_resid
 #####################################
@@ -170,7 +170,16 @@ def select_user_interval_spec(spec, wlranges_list):
 
     return spec.wave, spec.flux
 ###########################################
-def space_proc(infiles, GCOG_dir, wlranges_list, working_dir):
+def compute_norm_rad_pix(wave_obs, norm_rad):
+
+    #norm_rad must be larger than 5 angstrom and smaller than the width of the spectrum
+    norm_rad = np.min([np.max([5., norm_rad]), len(wave_obs)])
+    #compute the width in pixels
+    norm_rad_pix = np.argmin(np.abs(wave_obs-wave_obs.iloc[0] - norm_rad))
+
+    return norm_rad_pix
+#############################################
+def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm, RV_ini, norm_rad):
     global continuum
 
     poly = PolynomialFeatures(degree=2)
@@ -196,12 +205,12 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir):
     teff = 5000.
     logg = 3.0
     met = -0.3
-    fwhm = 0.2
-    rv = 0.0
     scaler = pickle.load(open(GCOG_dir + 'scaler_NN', 'rb'))
     variables = scaler.transform(np.array([[teff, logg, met, 0.0]]))[0]
     #append fwhm and rv
-    variables = np.append(variables[0:3], [fwhm, rv])
+    variables = np.append(variables[0:3], [fwhm, RV_ini])
+    #define norm_rad in pixels
+    norm_rad_pix = compute_norm_rad_pix(wave_obs, norm_rad)
 
     for idx in llist.index.tolist():
         model_name = idx + '_NN_model'
@@ -211,7 +220,7 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir):
     #flux = make_model(llist, ML_models_dict, wave_obs, pars_scaled_obs)
 
 
-    out = least_squares(compute_residuals, variables, args=(wave_obs, flux_obs, llist, ML_models_dict, scaler, poly), method='lm', diff_step=0.01, gtol=0.1)
+    out = least_squares(compute_residuals, variables, args=(wave_obs, flux_obs, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='lm', diff_step=0.01, gtol=0.1)
     
     flux_model = make_model(llist, ML_models_dict, wave_obs, out.x, scaler, poly)
 
@@ -237,6 +246,14 @@ def space_options(options=None):
         help='Directory where SP_Ace can write its outputs', type=none_or_str, default=None, required=True)
     parser.add_argument('--GCOG_dir', 
         help='Directory of the GCOG library', type=none_or_str, default=None, required=True)
+    parser.add_argument('--RV_ini', 
+        help='Initial Radial Velocity', default=0.0, required=False)
+    parser.add_argument('--fwhm', 
+        help='FWHM (initial guess)', default=None, required=True)
+    parser.add_argument('--norm_rad', 
+        help='FWHM (initial guess)', default=30, required=False)
+
+
 
     args = None
     if options is None:
@@ -269,7 +286,7 @@ def space_options(options=None):
             wlranges_list.append([float(x) for x in item.split(",")])
 
 
-    space_proc(infiles, GCOG_dir, wlranges_list, working_dir)
+    space_proc(infiles, GCOG_dir, wlranges_list, working_dir, float(args.fwhm), float(args.RV_ini), float(args.norm_rad))
 ########################################################################
 if __name__ == '__main__':
 
@@ -284,13 +301,16 @@ if __name__ == '__main__':
     '--wlranges', blue_range,
     '--working_dir', work_dir,
     '--GCOG_dir', '/home/corrado/workTux2/EW_library_SPACE2.2/libGCOG_ML/',
+    '--RV_ini', '0.0',
+    '--fwhm', '0.2',
+    '--norm_rad', '10.0',
 #    '--error_est', 'False',
     #the following options are not necessary and have default values
 #    '--Salaris_MH', 'True',
-#    '--RV_ini', 'True',
+
 #    '--ABD_loop', 'True',
 #    '--SN_sp_file', 'True',
-#    '--norm_rad', '30.0',
+
     ] 
     space_options(options=option)
 #else:
