@@ -6,11 +6,7 @@ import argparse
 
 from scipy.stats import norm
 from scipy.special import voigt_profile
-from astropy.modeling.models import Voigt1D
 import matplotlib.pyplot as plt
-from SPace_data import gamL_coeff
-
-from astropy.convolution import convolve, Box1DKernel
 
 from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
 from sklearn.neural_network import MLPRegressor
@@ -19,6 +15,8 @@ from scipy.optimize import leastsq,least_squares
 from sklearn.utils import shuffle
 import pickle
 import time
+
+import SPAce_classes as classes
 ###########################################################################
 ## To pass None keyword as command line argument
 def none_or_str(value):
@@ -40,14 +38,6 @@ def none_or_str(value):
 #    gamma = np.dot(transf,gamL_coeff)
 #
 #    return np.max([gamma,0.01])
-###########################################
-def compute_gamma(ew, sigma, logg, teff, poly):
-    x = np.array([ew, sigma, logg, teff], dtype=float)
-
-    x_poly = poly.fit_transform([x])
-    gamma = np.dot(x_poly[0],gamL_coeff)
-
-    return np.max([gamma,0.01])
 
 ###########################################
 #def compute_gamma_label(ew, sigma, logg, teff):
@@ -79,124 +69,112 @@ def compute_gauss_profile(wave_centre, wave, fwhm, ew):
     return strength[0]
 
 ###########################################
-#def compute_voigt_profile(wave, sigma, ew, logg, teff):
-#
-#    gamma = compute_gamma(ew, sigma, logg, teff)
-#    sigma_arr = np.ones(len(wave))*sigma
-#    gamma_arr = np.ones(len(wave))*gamma
-#    strength = voigt_profile(wave, sigma_arr, gamma_arr)*ew
-#    return strength
+def compute_voigt_profile(wave, sigma, ew, logg, teff):
+
+    gamma = compute_gamma(ew, sigma, logg, teff)
+    sigma_arr = np.ones(len(wave))*sigma
+    gamma_arr = np.ones(len(wave))*gamma
+    strength = voigt_profile(wave, sigma_arr, gamma_arr)*ew
+    return strength
 ###########################################
-def compute_voigtD1_profile(wave, wave_c, fwhm, gamma, ew, logg, teff, poly):
-
-
-    profile = Voigt1D(x_0=wave_c, fwhm_L=gamma*2, fwhm_G=fwhm)
-    norm_area = np.dot(profile(wave[0:-1]),np.diff(wave)).sum()
-#    print('ew, area ' , ew, norm_area)
-    return profile(wave)*ew/norm_area
-###########################################
-def make_model(llist, ML_models_dict, wave_arr, variables, scaler, poly):
-
-#    pdb.set_trace()
-    pars_scaled = variables[0:3]
-
-    pars_scaled = np.append(pars_scaled, 0.0) #add the El/M equal to zero
-    fwhm = np.abs(variables[3])
-    rv = variables[4]
-
-    model_arr = np.zeros((len(ML_models_dict),len(wave_arr)))
-
-
-    pars = scaler.inverse_transform([pars_scaled])[0]
-    print(pars[0:3], fwhm, rv)
-
-    shift = 1.0+rv/299792.0 #doppler shift to apply to wavelength
-
-    for i, (index, model) in enumerate(ML_models_dict.items()):
-
-        wave_centre = llist.wavelength.loc[index]
-        wave_rv_shifted = wave_centre * shift
-        ew = model.predict([pars_scaled])[0]
-        gamma = compute_gamma(ew/1000., fwhm/2.35, pars[1], pars[0], poly)
-        width = fwhm + gamma
-        if ew<1.:
-            continue
-        pos_ini = np.argmin(np.abs(wave_arr-(wave_centre-3*width)))
-        pos_end = np.argmin(np.abs(wave_arr-(wave_centre+3*width)))
-
-
-        model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(wave_arr[pos_ini:pos_end], wave_rv_shifted, fwhm, gamma, ew/1000., pars[1], pars[0], poly)
-
-    return 1.0 - model_arr.sum(axis=0)
-###########################################
-def compute_residuals(variables, wave, flux_obs, llist, ML_models_dict,scaler, poly, norm_rad_pix):
+def compute_residuals(variables, spec_obj, llist, ML_models_dict,scaler, poly, norm_rad_pix):
     global continuum
     
-    flux_model = make_model(llist, ML_models_dict, wave, variables, scaler, poly)
-    continuum = fit_continuum(flux_obs, flux_model, norm_rad_pix)
-    residuals = flux_model - np.divide(flux_obs, continuum)
+    spec_obj.fwhm = variables[3]
+    spec_obj.RV = variables[4]
+
+    spec_obj.make_model(llist, ML_models_dict, variables, scaler, poly)
+    spec_obj.fit_continuum(norm_rad_pix)
+
+    residuals = np.divide(spec_obj.model_flux - spec_obj.flux, spec_obj.sig_noise)
 
     return residuals
 #####################################
-def fit_continuum(flux_obs, flux_model, norm_rad_pix):
 
-    resid = flux_obs - flux_model
-    box_1D_kernel = Box1DKernel(norm_rad_pix*2)
-    smooth_resid = convolve(resid, box_1D_kernel)
-    return 1.0 + smooth_resid
 #####################################
-def select_user_interval_ll(llist, wlranges_list):
+def compute_SN(flux_obs, flux_model, sig_noise, rej_wave_bool):
+    resid_abs = np.abs(flux_obs - flux_model)
+    box_1D_kernel = Box1DKernel(50)
+    sig_noise[~rej_wave_bool] = convolve(resid_abs[~rej_wave_bool], box_1D_kernel)
 
-    boole2drop = np.ones(len(llist)).astype(bool)
+    return sig_noise
+#####################################
+def select_user_interval_ll(llist, spec_obj, wlranges_list):
+
+    boole2drop_ll = np.ones(len(llist)).astype(bool)
 
     for wave1, wave2 in wlranges_list:
-        wave_inf = np.min([wave1, wave2])
-        wave_sup = np.max([wave1, wave2])
-        boole2keep_local = (llist.wavelength >= wave_inf) & (llist.wavelength <= wave_sup)
-        boole2drop = boole2drop & ~boole2keep_local
-    idx2drop = llist[boole2drop].index
-    llist.drop(idx2drop, inplace=True)
+        wave_inf = np.max([spec_obj.wave[0], np.min([wave1, wave2])])
+        wave_sup = np.min([spec_obj.wave[-1], np.max([wave1, wave2])])
+        #set a boolean
+        boole2keep_local_ll = (llist.wavelength > wave_inf) & (llist.wavelength < wave_sup)
+        #combine the two booleans
+        boole2drop_ll = boole2drop_ll & ~boole2keep_local_ll
+    #apply them
+    idx2drop_ll = llist[boole2drop_ll].index
+    #drop the rows not included in the user wavelength ranges
+    llist.drop(idx2drop_ll, inplace=True)
 
     return llist
 #####################################
-def select_user_interval_spec(spec, wlranges_list):
-
-    boole2drop = np.ones(len(spec)).astype(bool)
-
-    for wave1, wave2 in wlranges_list:
-        wave_inf = np.min([wave1, wave2])
-        wave_sup = np.max([wave1, wave2])
-        boole2keep_local = (spec.wave >= wave_inf) & (spec.wave <= wave_sup)
-        boole2drop = boole2drop & ~boole2keep_local
-    idx2drop = spec[boole2drop].index
-    spec.drop(idx2drop, inplace=True)
-
-    return spec.wave, spec.flux
-###########################################
-def compute_norm_rad_pix(wave_obs, norm_rad):
+def compute_norm_rad_pix(wave, norm_rad):
 
     #norm_rad must be larger than 5 angstrom and smaller than the width of the spectrum
-    norm_rad = np.min([np.max([5., norm_rad]), len(wave_obs)])
+    norm_rad = np.min([np.max([5., norm_rad]), len(wave)])
     #compute the width in pixels
-    norm_rad_pix = np.argmin(np.abs(wave_obs-wave_obs.iloc[0] - norm_rad))
+    norm_rad_pix = np.argmin(np.abs(wave-wave[0] - norm_rad))
 
     return norm_rad_pix
 #############################################
-def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm, RV_ini, norm_rad):
+#def set_up_sig_noise(SN_sp_file, wave):
+#
+#    if SN_sp_file==True:
+#        SN_array = pd.read_csv(SN_sp_file, index_col=0)
+#        sig_noise = 1./SN_array.values
+#    else:
+#        sig_noise = np.ones(len(wave))/100. #we assume initially SN=100
+#    
+#    return sig_noise
+#############################################
+#def update_sig_noise(wave, sig_noise):
+#
+#    wave_rej = SPdat.w_rej_op + SPdat.w_rej_nlte + SPdat.w_rej_unknown + SPdat.w_rej_bad
+#    rad_rej = SPdat.r_rej_op + SPdat.r_rej_nlte + SPdat.r_rej_unknown + SPdat.r_rej_bad
+#
+#    for w_rej, r_rej in zip(wave_rej, rad_rej):
+#        boole = (np.abs(wave-w_rej) <= r_rej)
+#        sig_noise[boole] = 10.
+#
+#    return sig_noise
+#############################################
+def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm_ini, RV_ini, norm_rad, SN_sp_file):
     global continuum
 
     poly = PolynomialFeatures(degree=2)
 
     llist = pd.read_csv(GCOG_dir + 'linelist.csv', index_col=0)#, nrows=5000)
-    #select the part of the llist chosen by the user
-    llist = select_user_interval_ll(llist, wlranges_list)
 
 
     ML_models_dict = {}
 
-    spec_file = infiles[0]
-    spec_ = pd.read_csv(spec_file, delimiter='\s+',index_col=None, header=0, names=['wave', 'flux'])
-    wave_obs, flux_obs = select_user_interval_spec(spec_, wlranges_list)
+    #spec_file = infiles[0]
+    #spec_ = pd.read_csv(spec_file, delimiter='\s+',index_col=None, header=0, names=['wave', 'flux'])
+    #instantiate the spectrum object
+    spec_obj = classes.spectrum()
+    #load the spectrum
+    spec_obj.load_obs_spec(infiles[0])
+
+    #select the part of the llist and spec chosen by the user
+    llist = select_user_interval_ll(llist, spec_obj, wlranges_list)
+    #select the part of the spec chosen by the user
+    spec_obj.select_user_interval_sp(wlranges_list)
+
+
+    #check if there is a SN file and set up a sig_noise array
+#    sig_noise = set_up_sig_noise(SN_sp_file, wave_obs)
+#    sig_noise = update_sig_noise(wave_obs, sig_noise)
+    spec_obj.set_up_sig_noise(SN_sp_file)
+    spec_obj.update_sig_noise()
 
 #    flux_obs = 1. - spec_[(spec_.wave<4850) & (spec_.wave>4800)].flux.values
 #    wave_obs = spec_[(spec_.wave<4850) & (spec_.wave>4800)].wave.values
@@ -210,10 +188,14 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm, RV_ini, norm
     met = -0.3
     scaler = pickle.load(open(GCOG_dir + 'scaler_NN', 'rb'))
     variables = scaler.transform(np.array([[teff, logg, met, 0.0]]))[0]
+
+#    disp = np.diff(wave_obs)
+#    fwhm = np.max([fwhm, disp[0]*3]) # fwhm must be at least 3 pixels wide
+    spec_obj.initialize_disp_fwhm_RV(fwhm_ini, RV_ini)
     #append fwhm and rv
-    variables = np.append(variables[0:3], [fwhm, RV_ini])
+    variables = np.append(variables[0:3], [fwhm_ini, RV_ini])
     #define norm_rad in pixels
-    norm_rad_pix = compute_norm_rad_pix(wave_obs, norm_rad)
+    norm_rad_pix = compute_norm_rad_pix(spec_obj.wave, norm_rad)
 
     for idx in llist.index.tolist():
         model_name = idx + '_NN_model'
@@ -222,17 +204,16 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm, RV_ini, norm
     #pars_scaled_obs = scaler.transform(np.array([[5000, 4.2, 0.0, 0.0]]))[0]
     #flux = make_model(llist, ML_models_dict, wave_obs, pars_scaled_obs)
 
-
-    out = least_squares(compute_residuals, variables, args=(wave_obs, flux_obs, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='lm', diff_step=0.01, gtol=0.1)
+#    out = least_squares(compute_residuals, variables, args=(wave_obs, flux_obs, sig_noise, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='lm', diff_step=0.0001, ftol=0.1)
+    out = least_squares(compute_residuals, variables, args=(spec_obj, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='trf', xtol=0.01)
     
-    flux_model = make_model(llist, ML_models_dict, wave_obs, out.x, scaler, poly)
+    spec_obj.make_model(llist, ML_models_dict, out.x, scaler, poly)
 
-#    smooth_resid = fit_continuum(flux_obs, flux_model)
-
-    plt.plot(wave_obs, np.divide(flux_obs,continuum), color='green', linewidth=3, linestyle='dashed')
-    plt.plot(wave_obs, flux_obs, color='black', linewidth=1, linestyle='dashed')
-    plt.plot(wave_obs, flux_model, color='blue')
-    plt.plot(wave_obs, continuum, color='red')
+    plt.plot(spec_obj.wave, np.divide(spec_obj.flux,spec_obj.continuum), color='green', linewidth=3, linestyle='dashed')
+    plt.plot(spec_obj.wave, spec_obj.flux, color='black', linewidth=1, linestyle='dashed')
+    plt.plot(spec_obj.wave, spec_obj.model_flux, color='blue')
+    plt.plot(spec_obj.wave, spec_obj.continuum, color='red')
+    plt.plot(spec_obj.wave, spec_obj.sig_noise, color='violet')
     plt.show()
 
 ########################################################################
@@ -255,6 +236,8 @@ def space_options(options=None):
         help='FWHM (initial guess)', default=None, required=True)
     parser.add_argument('--norm_rad', 
         help='FWHM (initial guess)', default=30, required=False)
+    parser.add_argument('--SN_sp_file', 
+        help='Signal-to-Noise file as input', default=False, required=False)
 
 
 
@@ -289,7 +272,7 @@ def space_options(options=None):
             wlranges_list.append([float(x) for x in item.split(",")])
 
 
-    space_proc(infiles, GCOG_dir, wlranges_list, working_dir, float(args.fwhm), float(args.RV_ini), float(args.norm_rad))
+    space_proc(infiles, GCOG_dir, wlranges_list, working_dir, float(args.fwhm), float(args.RV_ini), float(args.norm_rad), args.SN_sp_file)
 ########################################################################
 if __name__ == '__main__':
 
@@ -307,12 +290,13 @@ if __name__ == '__main__':
     '--RV_ini', '0.0',
     '--fwhm', '0.2',
     '--norm_rad', '10.0',
+#    '--SN_sp_file', 'False',
 #    '--error_est', 'False',
     #the following options are not necessary and have default values
 #    '--Salaris_MH', 'True',
 
 #    '--ABD_loop', 'True',
-#    '--SN_sp_file', 'True',
+
 
     ] 
     space_options(options=option)
