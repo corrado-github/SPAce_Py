@@ -3,6 +3,7 @@ import pandas as pd
 import os, re, sys
 import pdb
 from astropy.modeling.models import Voigt1D
+from scipy.special import voigt_profile
 from astropy.convolution import convolve, Box1DKernel
 from sklearn.neural_network import MLPRegressor
 
@@ -16,15 +17,22 @@ def compute_gamma(ew, sigma, logg, teff, poly):
 
     return np.max([gamma,0.01])
 ###########################################
-def compute_voigtD1_profile(wave, wave_c, fwhm, gamma, ew, logg, teff, poly):
+#def compute_voigtD1_profile(wave, wave_c, fwhm, gamma, ew, logg, teff):
+#
+#
+#    profile = Voigt1D(x_0=wave_c, fwhm_L=gamma*2, fwhm_G=fwhm)
+#    profile_arr = profile(wave)
+#    norm_area = np.dot(profile_arr[0:-1],np.diff(wave)).sum()
+##    print('ew, area ' , ew, norm_area)
+#    return profile_arr*ew/norm_area
+###########################################
+def compute_voigtD1_profile(wave, wave_c, fwhm, gamma, ew, logg, teff):
 
-
-    profile = Voigt1D(x_0=wave_c, fwhm_L=gamma*2, fwhm_G=fwhm)
-    profile_arr = profile(wave)
-    norm_area = np.dot(profile_arr[0:-1],np.diff(wave)).sum()
-#    print('ew, area ' , ew, norm_area)
-    return profile_arr*ew/norm_area
-
+    sigma = fwhm/2.35
+    sigma_arr = np.ones(len(wave))*sigma
+    gamma_arr = np.ones(len(wave))*gamma
+    strength = voigt_profile(wave-wave_c, sigma_arr, gamma_arr)*ew
+    return strength
 ###########################################
 
 class spectrum():
@@ -46,6 +54,7 @@ class spectrum():
         self.obs_spec_df = pd.read_csv(file, delimiter='\s+',index_col=None, header=0, names=['wave', 'flux'])
         self.wave = self.obs_spec_df.wave.values
         self.flux = self.obs_spec_df.flux.values
+        self.norm_flux = self.obs_spec_df.flux.values
     ####
     def initialize_disp_fwhm_RV(self, fwhm_ini, RV_ini):
         self.disp = np.diff(self.wave)
@@ -69,7 +78,7 @@ class spectrum():
         self.obs_spec_df.drop(idx2drop_sp, inplace=True)
         self.wave = self.obs_spec_df.wave.values
         self.flux = self.obs_spec_df.flux.values
-
+        self.norm_flux = self.obs_spec_df.flux.values
     ####
     def set_up_sig_noise(self, SN_sp_file):
 
@@ -88,15 +97,15 @@ class spectrum():
             boole = (np.abs(self.wave-w_rej) <= r_rej)
             self.sig_noise[boole] = 10.
     ####
-    def make_model(self, llist, ML_models_dict, variables, scaler, poly):
+    def make_model_TGM(self, llist, ML_models_dict, variables, scaler, poly):
         #    pdb.set_trace()
         pars_scaled = variables[0:3]
 
         pars_scaled = np.append(pars_scaled, 0.4) #add the El/M equal to zero, which correspond to 0.4 after scaling
         sigma = self.fwhm/2.35
 
-        model_arr = np.zeros((len(ML_models_dict),len(self.wave)))
-
+#        model_arr = np.zeros((len(ML_models_dict),len(self.wave)))
+        model_arr = np.ones(len(self.wave))
 
         pars = scaler.inverse_transform([pars_scaled])[0]
         print(pars[0:3], self.fwhm, self.RV)
@@ -105,9 +114,11 @@ class spectrum():
 
         for i, (index, model) in enumerate(ML_models_dict.items()):
 
-            wave_centre = llist.wavelength.loc[index]
+            try:
+                wave_centre = llist.wavelength.loc[index]
+            except:
+                pdb.set_trace()
             wave_rv_shifted = wave_centre * shift
-
             ew = model.predict([pars_scaled])[0]
             gamma = compute_gamma(ew/1000., sigma, pars[1], pars[0], poly)
             width = self.fwhm + gamma
@@ -115,10 +126,9 @@ class spectrum():
                 continue
             pos_ini = np.argmin(np.abs(self.wave-(wave_centre-3*width)))
             pos_end = np.argmin(np.abs(self.wave-(wave_centre+3*width)))
-
-            model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(self.wave[pos_ini:pos_end], wave_rv_shifted, self.fwhm, gamma, ew/1000., pars[1], pars[0], poly)
-
-        self.model_flux = 1.0 - model_arr.sum(axis=0)
+#            model_arr[i,pos_ini:pos_end] = compute_voigtD1_profile(self.wave[pos_ini:pos_end], wave_rv_shifted, self.fwhm, gamma, ew/1000., pars[1], pars[0])
+            model_arr[pos_ini:pos_end] -= compute_voigtD1_profile(self.wave[pos_ini:pos_end], wave_rv_shifted, self.fwhm, gamma, ew/1000., pars[1], pars[0])
+        self.model_flux = model_arr
 
     ####
     def fit_continuum(self, norm_rad_pix):

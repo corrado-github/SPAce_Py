@@ -1,11 +1,11 @@
 import numpy as np
+import random
 import pandas as pd
 import os, re, sys
 import pdb
 import argparse
 
-from scipy.stats import norm
-from scipy.special import voigt_profile
+#from scipy.stats import norm
 import matplotlib.pyplot as plt
 
 from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
@@ -68,29 +68,17 @@ def compute_gauss_profile(wave_centre, wave, fwhm, ew):
     strength = norm.pdf(wave-wave_centre, scale=fwhm/2.35)*ew
     return strength[0]
 
-###########################################
-def compute_voigt_profile(wave, sigma, ew, logg, teff):
 
-    gamma = compute_gamma(ew, sigma, logg, teff)
-    sigma_arr = np.ones(len(wave))*sigma
-    gamma_arr = np.ones(len(wave))*gamma
-    strength = voigt_profile(wave, sigma_arr, gamma_arr)*ew
-    return strength
 ###########################################
 def compute_residuals(variables, spec_obj, llist, ML_models_dict,scaler, poly, norm_rad_pix):
-    global continuum
     
     spec_obj.fwhm = variables[3]
     spec_obj.RV = variables[4]
-
-    spec_obj.make_model(llist, ML_models_dict, variables, scaler, poly)
+    spec_obj.make_model_TGM(llist, ML_models_dict, variables, scaler, poly)
     spec_obj.fit_continuum(norm_rad_pix)
-
-    residuals = np.divide(spec_obj.model_flux - spec_obj.flux, spec_obj.sig_noise)
+    residuals = np.divide(spec_obj.model_flux - spec_obj.norm_flux, spec_obj.sig_noise)
 
     return residuals
-#####################################
-
 #####################################
 def compute_SN(flux_obs, flux_model, sig_noise, rej_wave_bool):
     resid_abs = np.abs(flux_obs - flux_model)
@@ -98,6 +86,13 @@ def compute_SN(flux_obs, flux_model, sig_noise, rej_wave_bool):
     sig_noise[~rej_wave_bool] = convolve(resid_abs[~rej_wave_bool], box_1D_kernel)
 
     return sig_noise
+#####################################
+def set_ML_models_dict(llist, GCOG_dir):
+    ML_models_dict = {}
+    for idx in llist.index.tolist():
+        model_name = idx + '_NN_model'
+        ML_models_dict[idx] = pickle.load(open(GCOG_dir + model_name, 'rb'))
+    return ML_models_dict
 #####################################
 def select_user_interval_ll(llist, spec_obj, wlranges_list):
 
@@ -113,9 +108,9 @@ def select_user_interval_ll(llist, spec_obj, wlranges_list):
     #apply them
     idx2drop_ll = llist[boole2drop_ll].index
     #drop the rows not included in the user wavelength ranges
-    llist.drop(idx2drop_ll, inplace=True)
+    llist_out = llist.drop(idx2drop_ll)
 
-    return llist
+    return llist_out
 #####################################
 def compute_norm_rad_pix(wave, norm_rad):
 
@@ -126,27 +121,6 @@ def compute_norm_rad_pix(wave, norm_rad):
 
     return norm_rad_pix
 #############################################
-#def set_up_sig_noise(SN_sp_file, wave):
-#
-#    if SN_sp_file==True:
-#        SN_array = pd.read_csv(SN_sp_file, index_col=0)
-#        sig_noise = 1./SN_array.values
-#    else:
-#        sig_noise = np.ones(len(wave))/100. #we assume initially SN=100
-#    
-#    return sig_noise
-#############################################
-#def update_sig_noise(wave, sig_noise):
-#
-#    wave_rej = SPdat.w_rej_op + SPdat.w_rej_nlte + SPdat.w_rej_unknown + SPdat.w_rej_bad
-#    rad_rej = SPdat.r_rej_op + SPdat.r_rej_nlte + SPdat.r_rej_unknown + SPdat.r_rej_bad
-#
-#    for w_rej, r_rej in zip(wave_rej, rad_rej):
-#        boole = (np.abs(wave-w_rej) <= r_rej)
-#        sig_noise[boole] = 10.
-#
-#    return sig_noise
-#############################################
 def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm_ini, RV_ini, norm_rad, SN_sp_file):
     global continuum
 
@@ -155,7 +129,7 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm_ini, RV_ini, 
     llist = pd.read_csv(GCOG_dir + 'linelist.csv', index_col=0)#, nrows=5000)
 
 
-    ML_models_dict = {}
+
 
     #spec_file = infiles[0]
     #spec_ = pd.read_csv(spec_file, delimiter='\s+',index_col=None, header=0, names=['wave', 'flux'])
@@ -196,18 +170,27 @@ def space_proc(infiles, GCOG_dir, wlranges_list, working_dir, fwhm_ini, RV_ini, 
     variables = np.append(variables[0:3], [fwhm_ini, RV_ini])
     #define norm_rad in pixels
     norm_rad_pix = compute_norm_rad_pix(spec_obj.wave, norm_rad)
+    #set the dictionary that holds the ML models
+    ML_models_dict = set_ML_models_dict(llist, GCOG_dir)
 
-    for idx in llist.index.tolist():
-        model_name = idx + '_NN_model'
-        ML_models_dict[idx] = pickle.load(open(GCOG_dir + model_name, 'rb'))
+    Npix = len(spec_obj.wave)
+    rand_pix_list = random.sample(list(np.arange(Npix)),5)
+    list_batch_windows = []
+    for i in rand_pix_list:
+        w_inf = np.clip(spec_obj.wave[i], spec_obj.wave[0], spec_obj.wave[-1]-5.)
+        w_sup = w_inf + 5.
+        list_batch_windows.append([w_inf, w_sup])
+        print(list_batch_windows)
+        llist_batch = select_user_interval_ll(llist, spec_obj, list_batch_windows)
+        ML_models_dict_batch = set_ML_models_dict(llist_batch, GCOG_dir)
+        out = least_squares(compute_residuals, variables, args=(spec_obj, llist_batch, ML_models_dict_batch, scaler, poly, norm_rad_pix), method='lm', xtol=0.1)
+        variables = out.x
 
-    #pars_scaled_obs = scaler.transform(np.array([[5000, 4.2, 0.0, 0.0]]))[0]
-    #flux = make_model(llist, ML_models_dict, wave_obs, pars_scaled_obs)
-
-#    out = least_squares(compute_residuals, variables, args=(wave_obs, flux_obs, sig_noise, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='lm', diff_step=0.0001, ftol=0.1)
-    out = least_squares(compute_residuals, variables, args=(spec_obj, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='trf', xtol=0.01)
+    print('*********************************************')
+    out = least_squares(compute_residuals, variables, args=(spec_obj, llist, ML_models_dict, scaler, poly, norm_rad_pix), method='lm', xtol=0.1)
+    spec_obj.make_model_TGM(llist, ML_models_dict, out.x, scaler, poly)
     
-    spec_obj.make_model(llist, ML_models_dict, out.x, scaler, poly)
+
 
     plt.plot(spec_obj.wave, np.divide(spec_obj.flux,spec_obj.continuum), color='green', linewidth=3, linestyle='dashed')
     plt.plot(spec_obj.wave, spec_obj.flux, color='black', linewidth=1, linestyle='dashed')
@@ -279,7 +262,7 @@ if __name__ == '__main__':
     current_dir = os.getcwd()
     work_dir = current_dir + '/work'
 
-    blue_range = '5212.0,5712.0'
+    blue_range = '4800.0,6860.0'
     red_range = '6300.0,6860.0'
 
     option= [
