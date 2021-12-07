@@ -11,4 +11,4 @@ The original SP_Ace FORTRAN95 code can be found at http://dc.g-vo.org/SP\_ACE.
 The present version of SP_Ace is written in Python. Unlike the original FORTAN code, this version uses Neural Network (NN) models for 
 the GCOG of the absorption lines of the line list. This solution can make the code easier because every GCOG NN model cover the full parameter space.
 
-The present code is work in progress.
+To date, this project has been suspended because the building of the spectra resulted to be much slower than the FORTRAN version.
